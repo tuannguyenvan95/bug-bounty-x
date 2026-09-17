@@ -1,0 +1,26 @@
+diff --git a/contracts/Vault.sol b/contracts/Vault.sol
+index 4b825dc..f8319aa 100644
+--- a/contracts/Vault.sol
++++ b/contracts/Vault.sol
+@@ -15,8 +15,10 @@ contract Vault {
+     mapping(address => uint256) public balances;
++    bool private _locked;
++
++    modifier nonReentrant() {
++        require(!_locked, "ReentrancyGuard: reentrant call");
++        _locked = true;
++        _;
++        _locked = false;
++    }
+ 
+-    function withdraw(uint256 amount) external {
++    function withdraw(uint256 amount) external nonReentrant {
+         require(balances[msg.sender] >= amount, "Insufficient balance");
+-        (bool sent, ) = msg.sender.call{value: amount}("");
+-        require(sent, "Failed to send Ether");
+-        balances[msg.sender] -= amount;
++        balances[msg.sender] -= amount;
++        (bool sent, ) = msg.sender.call{value: amount}("");
++        require(sent, "Failed to send Ether");
+     }
+ }
