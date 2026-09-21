@@ -5,6 +5,15 @@ from dataclasses import dataclass
 import json
 
 
+@gl.evm.contract_interface
+class _Recipient:
+    """EVM interface ensuring safe native transfer to EOAs and contracts."""
+    class View:
+        pass
+    class Write:
+        pass
+
+
 def _addr_str(addr: Address) -> str:
     """Safely format an Address instance into a lowercase hex string."""
     try:
@@ -300,10 +309,7 @@ class Contract(gl.Contract):
                     "reason": "Issue URL returned 404 Not Found or Access Denied."
                 }
 
-            truncated_diff = diff_text[:3500]
-            truncated_issue = issue_text[:2000]
-
-            # 3. Build Code Security Audit & Issue Context Prompt
+            # 3. Build Full Untruncated Code Security Audit & Issue Context Prompt
             prompt = f"""You are a Lead Smart Contract Security Auditor on the GenLayer decentralized consensus network.
 Evaluate the following verified pull request code diff and verified security issue details to determine whether the patch successfully fixes a valid security vulnerability in the configured repository, and assign a severity tier.
 
@@ -311,14 +317,14 @@ REPOSITORY: {repo_url_local} ({repo_slug_local})
 PR URL: {pr_url_local}
 ISSUE REFERENCE: {issue_url_local}
 
-VERIFIED SECURITY ISSUE CONTEXT:
+VERIFIED SECURITY ISSUE CONTEXT (FULL UNTRUNCATED):
 \"\"\"
-{truncated_issue}
+{issue_text}
 \"\"\"
 
-VERIFIED CODE DIFF / PATCH CONTENT:
+VERIFIED CODE DIFF / PATCH CONTENT (FULL UNTRUNCATED):
 \"\"\"
-{truncated_diff}
+{diff_text}
 \"\"\"
 
 SEVERITY GUIDELINES:
@@ -447,8 +453,11 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             self.claimed_patches[patch_key] = True
             self.pending_patches[patch_key] = False
 
-            # Disburse bounty directly to whitehat hacker (cast to u256)
-            gl.get_contract_at(claim.hacker).emit_transfer(value=u256(payout))
+            # Safe native transfer to both EOA wallets and Smart Contracts
+            try:
+                _Recipient(claim.hacker).emit_transfer(value=u256(int(payout)))
+            except Exception:
+                gl.get_contract_at(claim.hacker).emit_transfer(value=u256(int(payout)))
         else:
             claim.status = "REJECTED"
             claim.reason = "Pool has insufficient funds for bounty payout."
