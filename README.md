@@ -3,7 +3,7 @@
 > **Track:** Future of Work / Autonomous Protocols  
 > **Network:** GenLayer studionet (Chain ID: `61999` / `0xF1EF`)  
 > **Target Environment:** [GenLayer Studio](https://studio.genlayer.com)  
-> **Execution Engine:** GenVM / Optimistic Democracy Consensus  
+> **Execution Engine:** GenVM / Optimistic Democracy Semantic Consensus  
 
 ---
 
@@ -32,6 +32,7 @@ Below is an illustrative worked example based on the contract execution flow, ve
     "pool_id": "1",
     "creator": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
     "repo_url": "https://github.com/defi-core/vault",
+    "repo_slug": "github.com/defi-core/vault",
     "total_deposited": "10000",
     "p0_critical": "6000",
     "p1_high": "3000",
@@ -42,7 +43,10 @@ Below is an illustrative worked example based on the contract execution flow, ve
 
 #### Step B: Whitehat Bug Bounty Claim Submission
 - **Caller:** `0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC` (Whitehat Researcher)
-- **Method:** `submit_claim(pool_id="1", pr_diff_url="https://patch.example.com/exploit_fix.diff", issue_url="https://github.com/defi-core/vault/issues/99")`
+- **Method:** `submit_claim(pool_id="1", pr_diff_url="https://github.com/defi-core/vault/pull/99.diff", issue_url="https://github.com/defi-core/vault/issues/99")`
+- **Security Validations Enforced:**
+  - **Repository Binding:** Verified that PR and Issue belong strictly to `github.com/defi-core/vault`.
+  - **Replay Protection:** Verified that PR has not already received payout and is not currently pending.
 - **Transaction Output [Real Result from gltest]:** `claim_id = "1"`
 - **Initial Claim State [Real Result]:**
   ```json
@@ -50,7 +54,7 @@ Below is an illustrative worked example based on the contract execution flow, ve
     "claim_id": "1",
     "pool_id": "1",
     "hacker": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
-    "pr_diff_url": "https://patch.example.com/exploit_fix.diff",
+    "pr_diff_url": "https://github.com/defi-core/vault/pull/99.diff",
     "issue_url": "https://github.com/defi-core/vault/issues/99",
     "status": "PENDING",
     "severity_tier": "PENDING",
@@ -61,8 +65,8 @@ Below is an illustrative worked example based on the contract execution flow, ve
 #### Step C: Decentralized AI Code Review & Semantic Consensus Adjudication
 - **Method:** `adjudicate_claim(claim_id="1")`
 - **Consensus Behavior:**
-  - GenLayer consensus leader and validators fetch the PR patch diff directly on-chain via `gl.nondet.web.render`.
-  - Validators execute LLM security assessment prompt (`gl.nondet.exec_prompt`) to determine vulnerability exploitability.
+  - GenLayer consensus leader and validators fetch BOTH the PR patch diff and Issue security context directly on-chain via `gl.nondet.web.render`.
+  - Validators execute LLM security assessment prompt (`gl.nondet.exec_prompt`) evaluating the code patch against the verified issue description.
   - Patch diff demonstrates critical fix: reentrancy guard addition and state mutation prior to native token transfers.
   - AI classifies the fix as `P0` with `98%` confidence.
   - Validators reach semantic consensus on the verdict tier (`"P0"`).
@@ -72,7 +76,7 @@ Below is an illustrative worked example based on the contract execution flow, ve
     "claim_id": "1",
     "pool_id": "1",
     "hacker": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
-    "pr_diff_url": "https://patch.example.com/exploit_fix.diff",
+    "pr_diff_url": "https://github.com/defi-core/vault/pull/99.diff",
     "issue_url": "https://github.com/defi-core/vault/issues/99",
     "status": "APPROVED",
     "severity_tier": "P0",
@@ -82,28 +86,28 @@ Below is an illustrative worked example based on the contract execution flow, ve
     "resolved_at": "1"
   }
   ```
-- **Payout Settlement:**
+- **Payout & Replay Lockout:**
   - Autonomous token transfer: `6,000 GEN` is disbursed directly to whitehat address `0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC`.
   - Remaining pool balance updates from `10000` to `4000 GEN`.
+  - Patch is permanently registered in `claimed_patches`: any subsequent submission or payout attempt for this PR is rejected immediately.
 
 ---
 
-## 2. Executive Summary & The Problem
+## 2. Executive Summary & Security Enhancements
 
-Traditional web3 and open-source bug bounty programs (e.g. Immunefi, HackerOne, GitHub Security Advisories) suffer from critical friction points that undermine security collaboration:
+Traditional web3 and open-source bug bounty programs (e.g. Immunefi, HackerOne, GitHub Security Advisories) suffer from critical friction points:
 
-1. **Slow Triage & Resolution Delays:** Whitehat security researchers frequently wait weeks or even months for project teams to manually triage PRs and assess vulnerability severity.
-2. **Opaque Severity Disputes & Down-scoping:** Project maintainers often dispute whether an exploit is Critical (P0) or Medium (P2) to minimize payout commitments.
-3. **Escrow Custody & Payment Counterparty Risk:** Whitehats have no cryptographic guarantee that project teams will release the promised reward once the vulnerability patch is merged.
-4. **Manual Friction:** Payment disbursement requires off-chain multisig coordination and currency conversions.
+1. **Slow Triage & Resolution Delays:** Whitehat security researchers frequently wait weeks or months for project teams to manually triage PRs.
+2. **Opaque Severity Disputes & Down-scoping:** Project maintainers often dispute whether an exploit is Critical (P0) or Medium (P2).
+3. **Escrow Custody & Payment Counterparty Risk:** Whitehats have no cryptographic guarantee that project teams will release the promised reward.
+4. **Manual Friction:** Payment disbursement requires off-chain multisig coordination.
 
-### The Solution: BugBountyX
-**BugBountyX** is a decentralized, autonomous bug bounty protocol powered by GenLayer Intelligent Contracts. It turns open-source software security into a self-executing, decentralized gig economy:
-
-- **Trustless Escrow:** Project teams lock GEN tokens into dedicated on-chain bounty pools and define transparent severity brackets (`P0 Critical`, `P1 High`, `P2 Medium`).
-- **Autonomous On-Chain PR Triage:** When a whitehat submits a PR patch fix and issue link, GenLayer consensus validators directly fetch and render the live patch diff using `gl.nondet.web.render`. GitHub web PR URLs are automatically normalized to raw `.diff` streams.
-- **Decentralized AI Code Auditor Consensus:** GenLayer validator nodes independently execute specialized smart contract security LLM prompts (`gl.nondet.exec_prompt`) to determine if the patch fixes a real exploit and calculate the appropriate severity tier.
-- **Instant Autonomous Payout:** As soon as optimistic democracy validator consensus confirms the severity tier, the protocol automatically transfers the bounty payout directly to the whitehat's wallet address (`gl.get_contract_at(hacker).emit_transfer`).
+### BugBountyX Protocol Safeguards
+- **Repository Binding:** Every claim is cryptographically and logically bound to the bounty pool's configured repository (`repo_slug`). Claims with PRs or Issues from foreign repositories are rejected at submission.
+- **On-Chain Issue Context Verification:** Validators fetch and verify the actual Issue text directly on-chain using `gl.nondet.web.render`, ensuring the AI evaluates whether the PR code patch genuinely resolves the reported vulnerability.
+- **Persistent Replay Protection:** A persistent storage mapping (`claimed_patches` and `pending_patches`) prevents race conditions, duplicate pending submissions, and double-payout replays of the same patch.
+- **Semantic Consensus:** Validators agree on the **meaning** of the decision (categorical severity `P0`, `P1`, `P2`, `REJECTED`), ignoring LLM wording variance while ensuring opposing verdicts never both pass.
+- **Instant Autonomous Payout:** Automated disbursement directly to the hacker's address via `gl.get_contract_at(hacker).emit_transfer`.
 
 ---
 
@@ -119,10 +123,10 @@ sequenceDiagram
     participant Consensus as GenLayer AI Validators
 
     Team->>Contract: create_bounty_pool(repo_url, p0, p1, p2) + deposit GEN
-    Note over Contract: Bounty Pool active in storage
+    Note over Contract: Pool registered with normalized repo_slug
 
     Hacker->>Contract: submit_claim(pool_id, pr_diff_url, issue_url)
-    Note over Contract: Auto-normalize to .diff<br/>BountyClaim created (status: PENDING)
+    Note over Contract: Validate Repository Binding<br/>Check Replay Protection<br/>Auto-normalize to .diff<br/>Set pending_patches lock
 
     Hacker->>Contract: adjudicate_claim(claim_id)
     Contract->>Consensus: gl.vm.run_nondet(leader_fn, validator_fn)
@@ -131,7 +135,9 @@ sequenceDiagram
         Note over Consensus,Web: Non-Deterministic Execution
         Consensus->>Web: gl.nondet.web.render(pr_diff_url)
         Web-->>Consensus: Raw Patch Diff Stream
-        Consensus->>Consensus: gl.nondet.exec_prompt(Code Audit Prompt)
+        Consensus->>Web: gl.nondet.web.render(issue_url)
+        Web-->>Consensus: Verified Security Issue Context
+        Consensus->>Consensus: gl.nondet.exec_prompt(Diff + Issue Audit)
         Note over Consensus: Semantic Agreement on Severity Tier (P0/P1/P2/REJECTED)
     end
 
@@ -139,9 +145,9 @@ sequenceDiagram
     
     alt Severity Tier in [P0, P1, P2]
         Contract->>Hacker: emit_transfer(payout)
-        Note over Contract: Status: APPROVED, reward_awarded > 0
+        Note over Contract: claimed_patches[patch] = True (Replay Lock)<br/>pending_patches[patch] = False<br/>Status: APPROVED, reward_awarded > 0
     else Tier == REJECTED
-        Note over Contract: Status: REJECTED, reward_awarded = 0
+        Note over Contract: pending_patches[patch] = False<br/>Status: REJECTED, reward_awarded = 0
     end
 ```
 
@@ -170,8 +176,8 @@ def validator_fn(leader_res) -> bool:
 ### Why this achieves maximum Consensus Quality:
 1. **Meaning-Based Agreement:** LLMs inherently generate slightly different wording in the `reason` field across nodes and model backends (e.g. Llama vs DeepSeek). Strict string equality on the full JSON would cause accidental forks. By projecting the decision onto the categorical decision space (`P0`, `P1`, `P2`, `REJECTED`), consensus captures true subjective agreement on the verdict.
 2. **Never Weakened to Format-Only:** If two validator nodes reach opposing conclusions (e.g. Node A outputs `P0` and Node B outputs `REJECTED`), consensus **fails and triggers appeal**. Two conflicting decisions can never both pass.
-3. **Anti-Griefing Confidence Gate:** Any LLM inference resulting in high severity (`P0` or `P1`) with confidence below `65%` is automatically downgraded to `P2` (`[Confidence: <65%] Downgraded: ...`), ensuring that speculative claims cannot drain pool funds.
-4. **Invalid Diff & 404 Protection:** If a patch URL returns 404, access denied, or trivial documentation/typo edits, the consensus council immediately categorizes the claim as `REJECTED`, preserving pool funds.
+3. **Dual On-Chain Web Evidence:** Both the patch diff and the referenced security issue are fetched on-chain and verified before the LLM prompt is executed.
+4. **Anti-Griefing Confidence Gate:** Any LLM inference resulting in high severity (`P0` or `P1`) with confidence below `65%` is automatically downgraded to `P2`, ensuring that speculative claims cannot drain pool funds.
 5. **Solvency Protection:** Payouts are capped at the remaining `total_deposited` balance, preventing overdrawn contract state.
 
 ---
@@ -186,6 +192,7 @@ class BountyPool:
     pool_id: str
     creator: Address
     repo_url: str
+    repo_slug: str
     total_deposited: bigint
     p0_critical_amount: bigint  # Fund drain / remote code execution
     p1_high_amount: bigint      # Logic break / state freeze
@@ -214,19 +221,21 @@ class BountyClaim:
 
 ### Write Methods
 - `create_bounty_pool(repo_url: str, p0_critical: int, p1_high: int, p2_medium: int) -> str` **[payable]**  
-  Creates a new bounty escrow pool with defined payout tiers and initial deposited GEN. Returns `pool_id`.
+  Creates a new bounty escrow pool with defined payout tiers and initial deposited GEN. Extracts and binds `repo_slug`. Returns `pool_id`.
 - `top_up_pool(pool_id: str) -> None` **[payable]**  
   Deposits additional GEN funds into an existing bounty pool.
 - `submit_claim(pool_id: str, pr_diff_url: str, issue_url: str) -> str`  
-  Submits a whitehat vulnerability fix claim for evaluation. Auto-normalizes GitHub PR web URLs to `.diff` format. Returns `claim_id`.
+  Submits a whitehat vulnerability fix claim. Validates repository binding against `pool.repo_slug`, verifies replay protection, auto-normalizes GitHub PR URLs to `.diff`, and sets pending lock. Returns `claim_id`.
 - `adjudicate_claim(claim_id: str) -> None`  
-  Triggers decentralized validator consensus to fetch PR diff, run AI audit, and disburse payout.
+  Triggers decentralized validator consensus to fetch PR diff and Issue context, run AI code audit, disburse payout, and set permanent replay lock on approved patches.
 - `toggle_pool_status(pool_id: str, is_active: bool) -> None`  
   Allows pool creator or protocol owner to pause/unpause bounty claim submissions.
 
 ### View Methods
-- `get_pool(pool_id: str) -> str` — Returns JSON string of pool details.
+- `get_pool(pool_id: str) -> str` — Returns JSON string of pool details including `repo_slug`.
 - `get_claim(claim_id: str) -> str` — Returns JSON string of claim details.
+- `is_patch_claimed(pool_id: str, pr_diff_url: str) -> bool` — Check if a PR/patch has already received a payout.
+- `is_patch_pending(pool_id: str, pr_diff_url: str) -> bool` — Check if a PR/patch is currently pending adjudication.
 - `get_pool_count() -> int` — Total number of bounty pools created.
 - `get_claim_count() -> int` — Total number of claims submitted.
 
@@ -243,22 +252,24 @@ gltest tests/
 pytest -v
 ```
 
-### Test Suite Summary (100% Passing, 12 Test Cases)
+### Test Suite Summary (100% Passing, 14 Test Cases)
 ```text
-tests/test_bug_bounty_x.py::test_initial_state PASSED                    [  8%]
-tests/test_bug_bounty_x.py::test_create_pool_success PASSED              [ 16%]
-tests/test_bug_bounty_x.py::test_create_pool_invalid_inputs PASSED       [ 25%]
-tests/test_bug_bounty_x.py::test_top_up_pool PASSED                      [ 33%]
-tests/test_bug_bounty_x.py::test_submit_claim_success PASSED             [ 41%]
-tests/test_bug_bounty_x.py::test_github_pr_url_auto_normalized PASSED    [ 50%]
-tests/test_bug_bounty_x.py::test_submit_claim_invalid_conditions PASSED  [ 58%]
-tests/test_bug_bounty_x.py::test_adjudicate_p0_critical_approved PASSED  [ 66%]
-tests/test_bug_bounty_x.py::test_adjudicate_p1_high_approved PASSED      [ 75%]
-tests/test_bug_bounty_x.py::test_adjudicate_rejected_cosmetic_diff PASSED [ 83%]
-tests/test_bug_bounty_x.py::test_adjudicate_low_confidence_downgrades_to_p2 PASSED [ 91%]
+tests/test_bug_bounty_x.py::test_initial_state PASSED                    [  7%]
+tests/test_bug_bounty_x.py::test_create_pool_success PASSED              [ 14%]
+tests/test_bug_bounty_x.py::test_create_pool_invalid_inputs PASSED       [ 21%]
+tests/test_bug_bounty_x.py::test_top_up_pool PASSED                      [ 28%]
+tests/test_bug_bounty_x.py::test_submit_claim_success PASSED             [ 35%]
+tests/test_bug_bounty_x.py::test_github_pr_url_auto_normalized PASSED    [ 42%]
+tests/test_bug_bounty_x.py::test_repository_binding_rejects_mismatched_repo PASSED [ 50%]
+tests/test_bug_bounty_x.py::test_persistent_replay_protection_blocks_duplicate_claim PASSED [ 57%]
+tests/test_bug_bounty_x.py::test_adjudicate_p0_critical_approved_and_replay_locked PASSED [ 64%]
+tests/test_bug_bounty_x.py::test_adjudicate_p1_high_approved PASSED      [ 71%]
+tests/test_bug_bounty_x.py::test_adjudicate_rejected_cosmetic_diff PASSED [ 78%]
+tests/test_bug_bounty_x.py::test_adjudicate_rejected_if_issue_404 PASSED [ 85%]
+tests/test_bug_bounty_x.py::test_adjudicate_low_confidence_downgrades_to_p2 PASSED [ 92%]
 tests/test_bug_bounty_x.py::test_toggle_pool_status_and_permissions PASSED [100%]
 
-============================= 12 passed in 1.02s ==============================
+============================= 14 passed in 1.48s ==============================
 ```
 
 ---
@@ -270,4 +281,4 @@ tests/test_bug_bounty_x.py::test_toggle_pool_status_and_permissions PASSED [100%
 3. Click **New Contract** -> Name: `BugBountyX`.
 4. Copy and paste the contents of `contracts/bug_bounty_x.py`.
 5. Click **Deploy**.
-6. Once deployed at `0x3860F65FAECe09A7Aa016B61BAa93D6513Ca8919`, invoke `create_bounty_pool` with initial escrow deposit to start offering automated bounties!
+6. Once deployed, invoke `create_bounty_pool` with initial escrow deposit to start offering automated bounties!

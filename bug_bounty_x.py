@@ -24,6 +24,19 @@ def _get_sender() -> Address:
             raise gl.UserError("Cannot resolve sender address.")
 
 
+def _extract_repo_slug(url: str) -> str:
+    """Extract normalized repository slug (e.g. github.com/owner/repo) from URL."""
+    clean = url.strip().lower()
+    if clean.startswith("https://"):
+        clean = clean[8:]
+    elif clean.startswith("http://"):
+        clean = clean[7:]
+    parts = clean.strip("/").split("/")
+    if len(parts) >= 3:
+        return f"{parts[0]}/{parts[1]}/{parts[2]}"
+    return clean.strip("/")
+
+
 @allow_storage
 @dataclass
 class BountyPool:
@@ -31,6 +44,7 @@ class BountyPool:
     pool_id: str
     creator: Address
     repo_url: str
+    repo_slug: str
     total_deposited: bigint
     p0_critical_amount: bigint  # Fund drain / remote code execution
     p1_high_amount: bigint      # Logic break / state freeze
@@ -50,7 +64,7 @@ class BountyClaim:
     status: str          # "PENDING", "APPROVED", "REJECTED"
     severity_tier: str   # "P0", "P1", "P2", "REJECTED"
     reward_awarded: bigint
-    reason: str          # LLM incident response rational
+    reason: str          # LLM incident response rationale
     created_at: bigint
     resolved_at: bigint
 
@@ -65,6 +79,8 @@ class Contract(gl.Contract):
     claim_count: bigint
     pools: TreeMap[str, BountyPool]
     claims: TreeMap[str, BountyClaim]
+    claimed_patches: TreeMap[str, bool]
+    pending_patches: TreeMap[str, bool]
 
     def __init__(self):
         # GenVM automatically initializes TreeMap storage fields.
@@ -114,9 +130,11 @@ class Contract(gl.Contract):
         if p0 <= bigint(0) or p1 <= bigint(0) or p2 <= bigint(0):
             raise gl.UserError("Bounty tiers must be greater than 0.")
 
-        clean_repo = repo_url.strip()
+        clean_repo = repo_url.strip().rstrip("/")
         if not clean_repo.startswith("http://") and not clean_repo.startswith("https://"):
             raise gl.UserError("repo_url must start with http:// or https://")
+
+        repo_slug = _extract_repo_slug(clean_repo)
 
         self.pool_count += bigint(1)
         pid = str(self.pool_count)
@@ -125,6 +143,7 @@ class Contract(gl.Contract):
             pool_id=pid,
             creator=_get_sender(),
             repo_url=clean_repo,
+            repo_slug=repo_slug,
             total_deposited=deposit,
             p0_critical_amount=p0,
             p1_high_amount=p1,
@@ -152,6 +171,7 @@ class Contract(gl.Contract):
     def submit_claim(self, pool_id: str, pr_diff_url: str, issue_url: str) -> str:
         """
         Whitehat hacker submits a claim containing the PR diff URL and issue URL.
+        Binds the claim strictly to the pool's configured repository and enforces persistent replay protection.
         """
         if pool_id not in self.pools:
             raise gl.UserError("Pool not found.")
@@ -166,11 +186,32 @@ class Contract(gl.Contract):
         if not clean_pr.startswith("http://") and not clean_pr.startswith("https://"):
             raise gl.UserError("pr_diff_url must begin with http:// or https://")
 
-        # Automatically normalize GitHub pull request web URLs to raw diff endpoints
+        if not clean_issue.startswith("http://") and not clean_issue.startswith("https://"):
+            raise gl.UserError("issue_url must begin with http:// or https://")
+
+        # 1. Repository Binding: Enforce that PR and Issue belong strictly to configured repository
+        repo_slug = pool.repo_slug.lower()
+        if repo_slug not in clean_pr.lower():
+            raise gl.UserError(f"pr_diff_url does not belong to configured repository: {pool.repo_slug}")
+
+        if repo_slug not in clean_issue.lower():
+            raise gl.UserError(f"issue_url does not belong to configured repository: {pool.repo_slug}")
+
+        # 2. Auto-normalize GitHub pull request web URLs to raw diff endpoints
         if "github.com/" in clean_pr and "/pull/" in clean_pr:
             pr_base = clean_pr.rstrip("/")
             if not pr_base.endswith(".diff") and not pr_base.endswith(".patch"):
                 clean_pr = f"{pr_base}.diff"
+
+        # 3. Persistent Replay Protection: Check if PR/patch has already received payout or is pending
+        patch_key = f"{pool_id}:{clean_pr.lower()}"
+        if patch_key in self.claimed_patches and self.claimed_patches[patch_key]:
+            raise gl.UserError("This PR or patch has already received a bounty payout.")
+
+        if patch_key in self.pending_patches and self.pending_patches[patch_key]:
+            raise gl.UserError("A claim for this PR or patch is already pending adjudication.")
+
+        self.pending_patches[patch_key] = True
 
         self.claim_count += bigint(1)
         cid = str(self.claim_count)
@@ -195,7 +236,7 @@ class Contract(gl.Contract):
     def adjudicate_claim(self, claim_id: str) -> None:
         """
         Consensus leader & validators fetch the PR patch/diff, analyze the vulnerability
-        and fix severity, and resolve the payout.
+        and fix severity, verify Issue security context, and resolve the payout.
         """
         if claim_id not in self.claims:
             raise gl.UserError("Claim not found.")
@@ -207,42 +248,75 @@ class Contract(gl.Contract):
         pool = self.pools[claim.pool_id]
         pr_url_local = str(claim.pr_diff_url)
         issue_url_local = str(claim.issue_url)
+        repo_slug_local = str(pool.repo_slug)
+        repo_url_local = str(pool.repo_url)
 
         def leader_fn():
             # 1. Fetch PR diff directly on-chain
             diff_text = ""
-            fetch_error = False
+            diff_fetch_error = False
             try:
-                res = gl.nondet.web.render(pr_url_local, mode="text")
-                diff_text = res.content if hasattr(res, "content") else str(res)
+                res_diff = gl.nondet.web.render(pr_url_local, mode="text")
+                diff_text = res_diff.content if hasattr(res_diff, "content") else str(res_diff)
             except Exception:
-                fetch_error = True
+                diff_fetch_error = True
 
-            if fetch_error or not diff_text or len(diff_text.strip()) < 15:
+            if diff_fetch_error or not diff_text or len(diff_text.strip()) < 15:
                 return {
                     "tier": "REJECTED",
                     "confidence": 100,
                     "reason": "Unable to fetch or render PR diff URL."
                 }
 
-            lower_snippet = diff_text[:500].lower()
-            if any(err in lower_snippet for err in ["404 not found", "error 404", "access denied"]):
+            lower_diff = diff_text[:500].lower()
+            if any(err in lower_diff for err in ["404 not found", "error 404", "access denied"]):
                 return {
                     "tier": "REJECTED",
                     "confidence": 100,
                     "reason": "PR URL returned 404 Not Found or Access Denied."
                 }
 
-            truncated_diff = diff_text[:4000]
+            # 2. Fetch and verify Issue security context directly on-chain
+            issue_text = ""
+            issue_fetch_error = False
+            try:
+                res_issue = gl.nondet.web.render(issue_url_local, mode="text")
+                issue_text = res_issue.content if hasattr(res_issue, "content") else str(res_issue)
+            except Exception:
+                issue_fetch_error = True
 
-            # 2. Build Code Security Audit Prompt
+            if issue_fetch_error or not issue_text or len(issue_text.strip()) < 15:
+                return {
+                    "tier": "REJECTED",
+                    "confidence": 100,
+                    "reason": "Unable to fetch or verify Issue security context URL."
+                }
+
+            lower_issue = issue_text[:500].lower()
+            if any(err in lower_issue for err in ["404 not found", "error 404", "access denied"]):
+                return {
+                    "tier": "REJECTED",
+                    "confidence": 100,
+                    "reason": "Issue URL returned 404 Not Found or Access Denied."
+                }
+
+            truncated_diff = diff_text[:3500]
+            truncated_issue = issue_text[:2000]
+
+            # 3. Build Code Security Audit & Issue Context Prompt
             prompt = f"""You are a Lead Smart Contract Security Auditor on the GenLayer decentralized consensus network.
-Evaluate the following pull request code diff and issue details to determine whether it fixes a valid security vulnerability, and assign a severity tier.
+Evaluate the following verified pull request code diff and verified security issue details to determine whether the patch successfully fixes a valid security vulnerability in the configured repository, and assign a severity tier.
 
+REPOSITORY: {repo_url_local} ({repo_slug_local})
 PR URL: {pr_url_local}
 ISSUE REFERENCE: {issue_url_local}
 
-CODE DIFF / PATCH CONTENT:
+VERIFIED SECURITY ISSUE CONTEXT:
+\"\"\"
+{truncated_issue}
+\"\"\"
+
+VERIFIED CODE DIFF / PATCH CONTENT:
 \"\"\"
 {truncated_diff}
 \"\"\"
@@ -251,7 +325,7 @@ SEVERITY GUIDELINES:
 - P0: Critical severity. Direct fund theft, reentrancy drain, infinite minting, authentication bypass, or protocol collapse.
 - P1: High severity. Partial lock of funds, denial of service requiring hardfork, severe state corruption, or oracle manipulation.
 - P2: Medium severity. Griefing vectors, gas optimization bugs, minor logic inconsistency, unhandled exceptions without total fund loss.
-- REJECTED: Cosmetic refactoring, documentation fixes, invalid patches, spam, or trivial changes.
+- REJECTED: Cosmetic refactoring, documentation fixes, invalid patches, spam, or changes that do not resolve the verified security issue context.
 
 RESPONSE FORMAT:
 Respond ONLY with a VALID JSON object (no markdown, no backticks):
@@ -338,10 +412,14 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
         claim.reason = reason
         claim.resolved_at = self.claim_count
 
+        patch_key = f"{claim.pool_id}:{claim.pr_diff_url.lower()}"
+
         if tier == "REJECTED":
             claim.status = "REJECTED"
             claim.reward_awarded = bigint(0)
             self.claims[claim_id] = claim
+            # Release pending lock so another fix or claim can be submitted
+            self.pending_patches[patch_key] = False
             return
 
         # Determine payout based on tier
@@ -365,12 +443,17 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             self.pools[claim.pool_id] = pool
             self.claims[claim_id] = claim
 
+            # Persistent Replay Protection: Lock patch permanently against any future payouts
+            self.claimed_patches[patch_key] = True
+            self.pending_patches[patch_key] = False
+
             # Disburse bounty directly to whitehat hacker (cast to u256)
             gl.get_contract_at(claim.hacker).emit_transfer(value=u256(payout))
         else:
             claim.status = "REJECTED"
             claim.reason = "Pool has insufficient funds for bounty payout."
             self.claims[claim_id] = claim
+            self.pending_patches[patch_key] = False
 
     @gl.public.write
     def toggle_pool_status(self, pool_id: str, is_active: bool) -> None:
@@ -394,6 +477,7 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             "pool_id": p.pool_id,
             "creator": _addr_str(p.creator),
             "repo_url": p.repo_url,
+            "repo_slug": p.repo_slug,
             "total_deposited": str(p.total_deposited),
             "p0_critical": str(p.p0_critical_amount),
             "p1_high": str(p.p1_high_amount),
@@ -420,6 +504,28 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             "created_at": str(c.created_at),
             "resolved_at": str(c.resolved_at)
         })
+
+    @gl.public.view
+    def is_patch_claimed(self, pool_id: str, pr_diff_url: str) -> bool:
+        """Check whether a specific PR/patch has already received a bounty payout."""
+        clean_pr = pr_diff_url.strip()
+        if "github.com/" in clean_pr and "/pull/" in clean_pr:
+            pr_base = clean_pr.rstrip("/")
+            if not pr_base.endswith(".diff") and not pr_base.endswith(".patch"):
+                clean_pr = f"{pr_base}.diff"
+        patch_key = f"{pool_id}:{clean_pr.lower()}"
+        return patch_key in self.claimed_patches and self.claimed_patches[patch_key]
+
+    @gl.public.view
+    def is_patch_pending(self, pool_id: str, pr_diff_url: str) -> bool:
+        """Check whether a specific PR/patch is currently pending adjudication."""
+        clean_pr = pr_diff_url.strip()
+        if "github.com/" in clean_pr and "/pull/" in clean_pr:
+            pr_base = clean_pr.rstrip("/")
+            if not pr_base.endswith(".diff") and not pr_base.endswith(".patch"):
+                clean_pr = f"{pr_base}.diff"
+        patch_key = f"{pool_id}:{clean_pr.lower()}"
+        return patch_key in self.pending_patches and self.pending_patches[patch_key]
 
     @gl.public.view
     def get_pool_count(self) -> int:
