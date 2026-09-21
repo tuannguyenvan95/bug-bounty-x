@@ -11,11 +11,11 @@
 
 The BugBountyX Intelligent Contract is officially deployed and verified on GenLayer studionet:
 
-- **Contract Address:** `0x3860F65FAECe09A7Aa016B61BAa93D6513Ca8919`
+- **Contract Address:** `0x90f13C33D0BcB1eD7695D3931EE2C6e64A4d7469`
 - **Deployment Network:** `studionet` (Chain ID: `61999` / `0xF1EF`)
 - **Execution Environment:** GenVM / Optimistic Democracy Semantic Consensus
 - **Contract Source:** [`contracts/bug_bounty_x.py`](contracts/bug_bounty_x.py)
-- **Explorer:** `https://genlayer-explorer.vercel.app`
+- **Explorer:** [http://explorer-studio.genlayer.com/address/0x90f13C33D0BcB1eD7695D3931EE2C6e64A4d7469](http://explorer-studio.genlayer.com/address/0x90f13C33D0BcB1eD7695D3931EE2C6e64A4d7469)
 
 ### Worked Example: Incident Submission & AI Adjudicated Payout
 
@@ -281,4 +281,4 @@ tests/test_bug_bounty_x.py::test_toggle_pool_status_and_permissions PASSED [100%
 3. Click **New Contract** -> Name: `BugBountyX`.
 4. Copy and paste the contents of `contracts/bug_bounty_x.py`.
 5. Click **Deploy**.
-6. Once deployed, invoke `create_bounty_pool` with initial escrow deposit to start offering automated bounties!
+6. Once deployed at `0x90f13C33D0BcB1eD7695D3931EE2C6e64A4d7469`, invoke `create_bounty_pool` with initial escrow deposit to start offering automated bounties!
