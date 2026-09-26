@@ -33,17 +33,125 @@ def _get_sender() -> Address:
             raise gl.UserError("Cannot resolve sender address.")
 
 
-def _extract_repo_slug(url: str) -> str:
-    """Extract normalized repository slug (e.g. github.com/owner/repo) from URL."""
-    clean = url.strip().lower()
+def _parse_url_host_and_path(raw_url: str) -> tuple[str, str]:
+    """Parse raw URL into validated canonical host and clean path."""
+    clean = raw_url.strip()
+    if "?" in clean:
+        clean = clean.split("?")[0]
+    if "#" in clean:
+        clean = clean.split("#")[0]
+    clean = clean.strip()
+
     if clean.startswith("https://"):
-        clean = clean[8:]
+        rest = clean[8:]
     elif clean.startswith("http://"):
-        clean = clean[7:]
-    parts = clean.strip("/").split("/")
-    if len(parts) >= 3:
-        return f"{parts[0]}/{parts[1]}/{parts[2]}"
-    return clean.strip("/")
+        rest = clean[7:]
+    else:
+        raise gl.UserError("URL must start with http:// or https://")
+
+    parts = rest.split("/", 1)
+    host = parts[0].strip().lower()
+    path = parts[1].strip() if len(parts) > 1 else ""
+
+    if host not in ("github.com", "www.github.com"):
+        raise gl.UserError(f"Host must be github.com, got: {host}")
+
+    return host, path
+
+
+def _parse_canonical_repo(repo_url: str) -> tuple[str, str]:
+    """Extract and validate canonical owner and repository name from URL."""
+    _, path = _parse_url_host_and_path(repo_url)
+    segments = [s.strip() for s in path.strip("/").split("/") if s.strip()]
+    if len(segments) < 2:
+        raise gl.UserError("Invalid repository URL format. Expected: https://github.com/<owner>/<repo>")
+
+    owner = segments[0].lower()
+    repo = segments[1].lower()
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+
+    if not owner or not repo:
+        raise gl.UserError("Repository owner and name must not be empty.")
+
+    return owner, repo
+
+
+def _parse_canonical_pr(pr_url: str, expected_owner: str, expected_repo: str) -> tuple[int, str]:
+    """
+    Extract canonical pull request number and generate canonical .diff URL.
+    Validates host, repository identity, and resolves all aliases (.diff, .patch, /).
+    """
+    _, path = _parse_url_host_and_path(pr_url)
+    segments = [s.strip() for s in path.strip("/").split("/") if s.strip()]
+    if len(segments) < 4:
+        raise gl.UserError("Invalid PR URL format. Expected: https://github.com/<owner>/<repo>/pull/<number>")
+
+    owner = segments[0].lower()
+    repo = segments[1].lower()
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+
+    action = segments[2].lower()
+    if action != "pull":
+        raise gl.UserError(f"Invalid PR URL path: expected '/pull/', got '/{action}/'")
+
+    if owner != expected_owner.lower() or repo != expected_repo.lower():
+        raise gl.UserError(
+            f"PR belongs to repository '{owner}/{repo}', but pool requires '{expected_owner}/{expected_repo}'"
+        )
+
+    raw_id = segments[3].strip()
+    if raw_id.endswith(".diff"):
+        raw_id = raw_id[:-5]
+    elif raw_id.endswith(".patch"):
+        raw_id = raw_id[:-6]
+
+    try:
+        pr_number = int(raw_id)
+        if pr_number <= 0:
+            raise ValueError()
+    except Exception:
+        raise gl.UserError(f"Invalid pull request number: '{raw_id}'")
+
+    canonical_diff_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}.diff"
+    return pr_number, canonical_diff_url
+
+
+def _parse_canonical_issue(issue_url: str, expected_owner: str, expected_repo: str) -> tuple[int, str]:
+    """
+    Extract canonical issue number and generate canonical issue URL.
+    Validates host and repository identity.
+    """
+    _, path = _parse_url_host_and_path(issue_url)
+    segments = [s.strip() for s in path.strip("/").split("/") if s.strip()]
+    if len(segments) < 4:
+        raise gl.UserError("Invalid Issue URL format. Expected: https://github.com/<owner>/<repo>/issues/<number>")
+
+    owner = segments[0].lower()
+    repo = segments[1].lower()
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+
+    action = segments[2].lower()
+    if action != "issues":
+        raise gl.UserError(f"Invalid Issue URL path: expected '/issues/', got '/{action}/'")
+
+    if owner != expected_owner.lower() or repo != expected_repo.lower():
+        raise gl.UserError(
+            f"Issue belongs to repository '{owner}/{repo}', but pool requires '{expected_owner}/{expected_repo}'"
+        )
+
+    raw_id = segments[3].strip()
+    try:
+        issue_number = int(raw_id)
+        if issue_number <= 0:
+            raise ValueError()
+    except Exception:
+        raise gl.UserError(f"Invalid issue number: '{raw_id}'")
+
+    canonical_issue_url = f"https://github.com/{owner}/{repo}/issues/{issue_number}"
+    return issue_number, canonical_issue_url
 
 
 @allow_storage
@@ -53,7 +161,8 @@ class BountyPool:
     pool_id: str
     creator: Address
     repo_url: str
-    repo_slug: str
+    repo_owner: str
+    repo_name: str
     total_deposited: bigint
     p0_critical_amount: bigint  # Fund drain / remote code execution
     p1_high_amount: bigint      # Logic break / state freeze
@@ -68,6 +177,8 @@ class BountyClaim:
     claim_id: str
     pool_id: str
     hacker: Address
+    pr_number: bigint
+    issue_number: bigint
     pr_diff_url: str
     issue_url: str
     status: str          # "PENDING", "APPROVED", "REJECTED"
@@ -126,7 +237,7 @@ class Contract(gl.Contract):
     ) -> str:
         """
         Project teams lock funds into an escrow bounty pool and define payout brackets.
-        Amounts are passed in GEN (wei format).
+        Validates canonical host (github.com) and repository namespace.
         """
         deposit = bigint(gl.message.value)
         if deposit <= bigint(0):
@@ -139,11 +250,8 @@ class Contract(gl.Contract):
         if p0 <= bigint(0) or p1 <= bigint(0) or p2 <= bigint(0):
             raise gl.UserError("Bounty tiers must be greater than 0.")
 
-        clean_repo = repo_url.strip().rstrip("/")
-        if not clean_repo.startswith("http://") and not clean_repo.startswith("https://"):
-            raise gl.UserError("repo_url must start with http:// or https://")
-
-        repo_slug = _extract_repo_slug(clean_repo)
+        owner, repo = _parse_canonical_repo(repo_url)
+        canonical_repo_url = f"https://github.com/{owner}/{repo}"
 
         self.pool_count += bigint(1)
         pid = str(self.pool_count)
@@ -151,8 +259,9 @@ class Contract(gl.Contract):
         self.pools[pid] = BountyPool(
             pool_id=pid,
             creator=_get_sender(),
-            repo_url=clean_repo,
-            repo_slug=repo_slug,
+            repo_url=canonical_repo_url,
+            repo_owner=owner,
+            repo_name=repo,
             total_deposited=deposit,
             p0_critical_amount=p0,
             p1_high_amount=p1,
@@ -179,8 +288,9 @@ class Contract(gl.Contract):
     @gl.public.write
     def submit_claim(self, pool_id: str, pr_diff_url: str, issue_url: str) -> str:
         """
-        Whitehat hacker submits a claim containing the PR diff URL and issue URL.
-        Binds the claim strictly to the pool's configured repository and enforces persistent replay protection.
+        Whitehat hacker submits a claim containing PR URL and issue URL.
+        Enforces canonical host, repository identity, canonical PR identity,
+        and persistent replay protection.
         """
         if pool_id not in self.pools:
             raise gl.UserError("Pool not found.")
@@ -189,38 +299,20 @@ class Contract(gl.Contract):
         if not pool.is_active:
             raise gl.UserError("Bounty pool is inactive.")
 
-        clean_pr = pr_diff_url.strip()
-        clean_issue = issue_url.strip()
+        # 1. Canonical Host, Repository & PR Identity Validation
+        pr_number, canonical_diff_url = _parse_canonical_pr(pr_diff_url, pool.repo_owner, pool.repo_name)
+        issue_number, canonical_issue_url = _parse_canonical_issue(issue_url, pool.repo_owner, pool.repo_name)
 
-        if not clean_pr.startswith("http://") and not clean_pr.startswith("https://"):
-            raise gl.UserError("pr_diff_url must begin with http:// or https://")
+        # 2. Canonical Identity Replay Protection (immune to aliases like .diff, .patch, /)
+        canonical_patch_key = f"{pool.repo_owner}/{pool.repo_name}:PR-{pr_number}"
 
-        if not clean_issue.startswith("http://") and not clean_issue.startswith("https://"):
-            raise gl.UserError("issue_url must begin with http:// or https://")
+        if canonical_patch_key in self.claimed_patches and self.claimed_patches[canonical_patch_key]:
+            raise gl.UserError(f"Pull request #{pr_number} has already received a bounty payout.")
 
-        # 1. Repository Binding: Enforce that PR and Issue belong strictly to configured repository
-        repo_slug = pool.repo_slug.lower()
-        if repo_slug not in clean_pr.lower():
-            raise gl.UserError(f"pr_diff_url does not belong to configured repository: {pool.repo_slug}")
+        if canonical_patch_key in self.pending_patches and self.pending_patches[canonical_patch_key]:
+            raise gl.UserError(f"A claim for pull request #{pr_number} is already pending adjudication.")
 
-        if repo_slug not in clean_issue.lower():
-            raise gl.UserError(f"issue_url does not belong to configured repository: {pool.repo_slug}")
-
-        # 2. Auto-normalize GitHub pull request web URLs to raw diff endpoints
-        if "github.com/" in clean_pr and "/pull/" in clean_pr:
-            pr_base = clean_pr.rstrip("/")
-            if not pr_base.endswith(".diff") and not pr_base.endswith(".patch"):
-                clean_pr = f"{pr_base}.diff"
-
-        # 3. Persistent Replay Protection: Check if PR/patch has already received payout or is pending
-        patch_key = f"{pool_id}:{clean_pr.lower()}"
-        if patch_key in self.claimed_patches and self.claimed_patches[patch_key]:
-            raise gl.UserError("This PR or patch has already received a bounty payout.")
-
-        if patch_key in self.pending_patches and self.pending_patches[patch_key]:
-            raise gl.UserError("A claim for this PR or patch is already pending adjudication.")
-
-        self.pending_patches[patch_key] = True
+        self.pending_patches[canonical_patch_key] = True
 
         self.claim_count += bigint(1)
         cid = str(self.claim_count)
@@ -229,8 +321,10 @@ class Contract(gl.Contract):
             claim_id=cid,
             pool_id=pool_id,
             hacker=_get_sender(),
-            pr_diff_url=clean_pr,
-            issue_url=clean_issue,
+            pr_number=bigint(pr_number),
+            issue_number=bigint(issue_number),
+            pr_diff_url=canonical_diff_url,
+            issue_url=canonical_issue_url,
             status="PENDING",
             severity_tier="PENDING",
             reward_awarded=bigint(0),
@@ -257,11 +351,13 @@ class Contract(gl.Contract):
         pool = self.pools[claim.pool_id]
         pr_url_local = str(claim.pr_diff_url)
         issue_url_local = str(claim.issue_url)
-        repo_slug_local = str(pool.repo_slug)
+        repo_owner_local = str(pool.repo_owner)
+        repo_name_local = str(pool.repo_name)
         repo_url_local = str(pool.repo_url)
+        pr_number_int = int(claim.pr_number)
 
         def leader_fn():
-            # 1. Fetch PR diff directly on-chain
+            # 1. Fetch PR diff directly on-chain using contract-constructed canonical URL
             diff_text = ""
             diff_fetch_error = False
             try:
@@ -285,7 +381,7 @@ class Contract(gl.Contract):
                     "reason": "PR URL returned 404 Not Found or Access Denied."
                 }
 
-            # 2. Fetch and verify Issue security context directly on-chain
+            # 2. Fetch and verify Issue security context directly on-chain using canonical URL
             issue_text = ""
             issue_fetch_error = False
             try:
@@ -313,7 +409,7 @@ class Contract(gl.Contract):
             prompt = f"""You are a Lead Smart Contract Security Auditor on the GenLayer decentralized consensus network.
 Evaluate the following verified pull request code diff and verified security issue details to determine whether the patch successfully fixes a valid security vulnerability in the configured repository, and assign a severity tier.
 
-REPOSITORY: {repo_url_local} ({repo_slug_local})
+REPOSITORY: {repo_url_local} ({repo_owner_local}/{repo_name_local})
 PR URL: {pr_url_local}
 ISSUE REFERENCE: {issue_url_local}
 
@@ -418,14 +514,14 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
         claim.reason = reason
         claim.resolved_at = self.claim_count
 
-        patch_key = f"{claim.pool_id}:{claim.pr_diff_url.lower()}"
+        canonical_patch_key = f"{pool.repo_owner}/{pool.repo_name}:PR-{pr_number_int}"
 
         if tier == "REJECTED":
             claim.status = "REJECTED"
             claim.reward_awarded = bigint(0)
             self.claims[claim_id] = claim
             # Release pending lock so another fix or claim can be submitted
-            self.pending_patches[patch_key] = False
+            self.pending_patches[canonical_patch_key] = False
             return
 
         # Determine payout based on tier
@@ -449,9 +545,9 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             self.pools[claim.pool_id] = pool
             self.claims[claim_id] = claim
 
-            # Persistent Replay Protection: Lock patch permanently against any future payouts
-            self.claimed_patches[patch_key] = True
-            self.pending_patches[patch_key] = False
+            # Persistent Replay Protection: Lock canonical PR permanently against any future payouts
+            self.claimed_patches[canonical_patch_key] = True
+            self.pending_patches[canonical_patch_key] = False
 
             # Safe native transfer to both EOA wallets and Smart Contracts
             try:
@@ -462,7 +558,7 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             claim.status = "REJECTED"
             claim.reason = "Pool has insufficient funds for bounty payout."
             self.claims[claim_id] = claim
-            self.pending_patches[patch_key] = False
+            self.pending_patches[canonical_patch_key] = False
 
     @gl.public.write
     def toggle_pool_status(self, pool_id: str, is_active: bool) -> None:
@@ -486,7 +582,8 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             "pool_id": p.pool_id,
             "creator": _addr_str(p.creator),
             "repo_url": p.repo_url,
-            "repo_slug": p.repo_slug,
+            "repo_owner": p.repo_owner,
+            "repo_name": p.repo_name,
             "total_deposited": str(p.total_deposited),
             "p0_critical": str(p.p0_critical_amount),
             "p1_high": str(p.p1_high_amount),
@@ -504,6 +601,8 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             "claim_id": c.claim_id,
             "pool_id": c.pool_id,
             "hacker": _addr_str(c.hacker),
+            "pr_number": int(c.pr_number),
+            "issue_number": int(c.issue_number),
             "pr_diff_url": c.pr_diff_url,
             "issue_url": c.issue_url,
             "status": c.status,
@@ -515,26 +614,42 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
         })
 
     @gl.public.view
+    def is_pr_claimed(self, repo_owner: str, repo_name: str, pr_number: int) -> bool:
+        """Check whether a canonical PR identity has already received a bounty payout."""
+        canonical_key = f"{repo_owner.lower()}/{repo_name.lower()}:PR-{pr_number}"
+        return canonical_key in self.claimed_patches and self.claimed_patches[canonical_key]
+
+    @gl.public.view
+    def is_pr_pending(self, repo_owner: str, repo_name: str, pr_number: int) -> bool:
+        """Check whether a canonical PR identity is currently pending adjudication."""
+        canonical_key = f"{repo_owner.lower()}/{repo_name.lower()}:PR-{pr_number}"
+        return canonical_key in self.pending_patches and self.pending_patches[canonical_key]
+
+    @gl.public.view
     def is_patch_claimed(self, pool_id: str, pr_diff_url: str) -> bool:
-        """Check whether a specific PR/patch has already received a bounty payout."""
-        clean_pr = pr_diff_url.strip()
-        if "github.com/" in clean_pr and "/pull/" in clean_pr:
-            pr_base = clean_pr.rstrip("/")
-            if not pr_base.endswith(".diff") and not pr_base.endswith(".patch"):
-                clean_pr = f"{pr_base}.diff"
-        patch_key = f"{pool_id}:{clean_pr.lower()}"
-        return patch_key in self.claimed_patches and self.claimed_patches[patch_key]
+        """Check whether a specific PR URL has already received a bounty payout."""
+        if pool_id not in self.pools:
+            return False
+        pool = self.pools[pool_id]
+        try:
+            pr_num, _ = _parse_canonical_pr(pr_diff_url, pool.repo_owner, pool.repo_name)
+            canonical_key = f"{pool.repo_owner}/{pool.repo_name}:PR-{pr_num}"
+            return canonical_key in self.claimed_patches and self.claimed_patches[canonical_key]
+        except Exception:
+            return False
 
     @gl.public.view
     def is_patch_pending(self, pool_id: str, pr_diff_url: str) -> bool:
-        """Check whether a specific PR/patch is currently pending adjudication."""
-        clean_pr = pr_diff_url.strip()
-        if "github.com/" in clean_pr and "/pull/" in clean_pr:
-            pr_base = clean_pr.rstrip("/")
-            if not pr_base.endswith(".diff") and not pr_base.endswith(".patch"):
-                clean_pr = f"{pr_base}.diff"
-        patch_key = f"{pool_id}:{clean_pr.lower()}"
-        return patch_key in self.pending_patches and self.pending_patches[patch_key]
+        """Check whether a specific PR URL is currently pending adjudication."""
+        if pool_id not in self.pools:
+            return False
+        pool = self.pools[pool_id]
+        try:
+            pr_num, _ = _parse_canonical_pr(pr_diff_url, pool.repo_owner, pool.repo_name)
+            canonical_key = f"{pool.repo_owner}/{pool.repo_name}:PR-{pr_num}"
+            return canonical_key in self.pending_patches and self.pending_patches[canonical_key]
+        except Exception:
+            return False
 
     @gl.public.view
     def get_pool_count(self) -> int:
