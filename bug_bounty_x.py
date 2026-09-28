@@ -1,17 +1,7 @@
-# v0.2.16
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from genlayer import *
 from dataclasses import dataclass
 import json
-
-
-@gl.evm.contract_interface
-class _Recipient:
-    """EVM interface ensuring safe native transfer to EOAs and contracts."""
-    class View:
-        pass
-    class Write:
-        pass
 
 
 def _addr_str(addr: Address) -> str:
@@ -31,6 +21,13 @@ def _get_sender() -> Address:
             return gl.message.sender_address
         except Exception:
             raise gl.UserError("Cannot resolve sender address.")
+
+
+def _safe_transfer(recipient: Address, amount: bigint) -> None:
+    """Safely disburse native GEN to an address using official GenLayer SDK pattern."""
+    if amount <= bigint(0):
+        return
+    gl.get_contract_at(recipient).emit_transfer(value=u256(int(amount)))
 
 
 def _parse_url_host_and_path(raw_url: str) -> tuple[str, str]:
@@ -405,7 +402,10 @@ class Contract(gl.Contract):
                     "reason": "Issue URL returned 404 Not Found or Access Denied."
                 }
 
-            # 3. Build Full Untruncated Code Security Audit & Issue Context Prompt
+            # Safe context boundary to avoid LLM context overflow
+            safe_issue = issue_text[:2000]
+            safe_diff = diff_text[:4000]
+
             prompt = f"""You are a Lead Smart Contract Security Auditor on the GenLayer decentralized consensus network.
 Evaluate the following verified pull request code diff and verified security issue details to determine whether the patch successfully fixes a valid security vulnerability in the configured repository, and assign a severity tier.
 
@@ -413,14 +413,14 @@ REPOSITORY: {repo_url_local} ({repo_owner_local}/{repo_name_local})
 PR URL: {pr_url_local}
 ISSUE REFERENCE: {issue_url_local}
 
-VERIFIED SECURITY ISSUE CONTEXT (FULL UNTRUNCATED):
+VERIFIED SECURITY ISSUE CONTEXT:
 \"\"\"
-{issue_text}
+{safe_issue}
 \"\"\"
 
-VERIFIED CODE DIFF / PATCH CONTENT (FULL UNTRUNCATED):
+VERIFIED CODE DIFF / PATCH CONTENT:
 \"\"\"
-{diff_text}
+{safe_diff}
 \"\"\"
 
 SEVERITY GUIDELINES:
@@ -549,11 +549,8 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             self.claimed_patches[canonical_patch_key] = True
             self.pending_patches[canonical_patch_key] = False
 
-            # Safe native transfer to both EOA wallets and Smart Contracts
-            try:
-                _Recipient(claim.hacker).emit_transfer(value=u256(int(payout)))
-            except Exception:
-                gl.get_contract_at(claim.hacker).emit_transfer(value=u256(int(payout)))
+            # Safe native transfer to recipient
+            _safe_transfer(claim.hacker, payout)
         else:
             claim.status = "REJECTED"
             claim.reason = "Pool has insufficient funds for bounty payout."
