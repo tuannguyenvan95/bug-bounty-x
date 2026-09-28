@@ -11,11 +11,11 @@
 
 The BugBountyX Intelligent Contract is officially deployed and verified on GenLayer studionet:
 
-- **Contract Address:** `0x90f13C33D0BcB1eD7695D3931EE2C6e64A4d7469`
+- **Contract Address:** `0x13f5AB411F7F18f3f04DC2c0c07AF8da2bBB7B7A`
 - **Deployment Network:** `studionet` (Chain ID: `61999` / `0xF1EF`)
 - **Execution Environment:** GenVM / Optimistic Democracy Semantic Consensus
 - **Contract Source:** [`contracts/bug_bounty_x.py`](contracts/bug_bounty_x.py)
-- **Explorer:** [http://explorer-studio.genlayer.com/address/0x90f13C33D0BcB1eD7695D3931EE2C6e64A4d7469](http://explorer-studio.genlayer.com/address/0x90f13C33D0BcB1eD7695D3931EE2C6e64A4d7469)
+- **Explorer:** [http://explorer-studio.genlayer.com/address/0x13f5AB411F7F18f3f04DC2c0c07AF8da2bBB7B7A](http://explorer-studio.genlayer.com/address/0x13f5AB411F7F18f3f04DC2c0c07AF8da2bBB7B7A)
 
 ### Worked Example: Incident Submission & AI Adjudicated Payout
 
