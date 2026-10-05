@@ -99,8 +99,8 @@ def test_submit_claim_success(contract, direct_vm, direct_alice, direct_bob):
     assert '"status": "PENDING"' in claim_data
 
     # Check canonical identity view methods
-    assert contract.is_pr_pending("org", "repo", 42) is True
-    assert contract.is_pr_claimed("org", "repo", 42) is False
+    assert contract.is_pr_pending(pool_id, 42) is True
+    assert contract.is_pr_claimed(pool_id, 42) is False
 
 
 def test_unrelated_host_bypass_blocked(contract, direct_vm, direct_alice, direct_bob):
@@ -235,8 +235,8 @@ index 1234567..89abcdef 100644
     assert '"total_deposited": "4000"' in pool_data
 
     # Canonical PR #99 is now marked as claimed
-    assert contract.is_pr_claimed("org", "repo", 99) is True
-    assert contract.is_pr_pending("org", "repo", 99) is False
+    assert contract.is_pr_claimed(pool_id, 99) is True
+    assert contract.is_pr_pending(pool_id, 99) is False
 
     # Attempting to re-claim using .patch alias MUST BE REJECTED
     with pytest.raises(Exception):
@@ -306,8 +306,8 @@ def test_adjudicate_rejected_cosmetic_diff(contract, direct_vm, direct_alice, di
     assert '"reward_awarded": "0"' in claim_data
 
     # Pending lock released upon rejection, allowing another fix to be submitted
-    assert contract.is_pr_pending("org", "repo", 101) is False
-    assert contract.is_pr_claimed("org", "repo", 101) is False
+    assert contract.is_pr_pending(pool_id, 101) is False
+    assert contract.is_pr_claimed(pool_id, 101) is False
 
 
 def test_adjudicate_rejected_if_issue_404(contract, direct_vm, direct_alice, direct_bob):
@@ -388,3 +388,157 @@ def test_toggle_pool_status_and_permissions(contract, direct_vm, direct_alice, d
     direct_vm.sender = direct_alice
     contract.toggle_pool_status(pool_id, True)
     assert '"is_active": true' in contract.get_pool(pool_id)
+
+
+def test_creator_close_and_withdraw_success(contract, direct_vm, direct_alice, direct_bob):
+    """
+    Test safe creator close-and-withdraw path for unused pool funds.
+    """
+    direct_vm.sender = direct_alice
+    direct_vm.value = 10000
+    pool_id = contract.create_bounty_pool("https://github.com/org/repo", 5000, 2000, 500)
+
+    # Bob (non-creator) attempts to close and withdraw -> MUST FAIL
+    direct_vm.sender = direct_bob
+    with pytest.raises(Exception):
+        contract.close_and_withdraw_pool(pool_id)
+
+    # Alice (creator) closes pool with zero pending claims -> SUCCEEDS
+    direct_vm.sender = direct_alice
+    refunded = contract.close_and_withdraw_pool(pool_id)
+    assert int(refunded) == 10000
+
+    pool_data = contract.get_pool(pool_id)
+    assert '"total_deposited": "0"' in pool_data
+    assert '"is_active": false' in pool_data
+
+    # Attempting to withdraw again from empty pool -> MUST FAIL
+    with pytest.raises(Exception):
+        contract.close_and_withdraw_pool(pool_id)
+
+    # Submitting claim to closed pool -> MUST FAIL
+    direct_vm.sender = direct_bob
+    with pytest.raises(Exception):
+        contract.submit_claim(
+            pool_id,
+            "https://github.com/org/repo/pull/1",
+            "https://github.com/org/repo/issues/1"
+        )
+
+
+def test_pending_claim_protection_blocks_withdraw(contract, direct_vm, direct_alice, direct_bob):
+    """
+    Test that pool creator cannot bypass pending claims to withdraw funds.
+    Funds can only be withdrawn after all pending claims are settled.
+    """
+    direct_vm.sender = direct_alice
+    direct_vm.value = 10000
+    pool_id = contract.create_bounty_pool("https://github.com/org/repo", 4000, 2000, 500)
+
+    # Bob submits claim -> pending_claims_count becomes 1
+    direct_vm.sender = direct_bob
+    claim_id = contract.submit_claim(
+        pool_id,
+        "https://github.com/org/repo/pull/55",
+        "https://github.com/org/repo/issues/55"
+    )
+
+    pool_data = contract.get_pool(pool_id)
+    assert '"pending_claims_count": 1' in pool_data
+
+    # Alice attempts to close-and-withdraw while claim is pending -> MUST BE REJECTED
+    direct_vm.sender = direct_alice
+    with pytest.raises(Exception):
+        contract.close_and_withdraw_pool(pool_id)
+
+    # Mock web & LLM to adjudicate the claim (APPROVED P2, payout 500)
+    direct_vm.mock_web("pull/55.diff", {"status": 200, "body": "diff --git a/Bug.sol: fixed edge case"})
+    direct_vm.mock_web("issues/55", {"status": 200, "body": "Issue #55: Edge case in calculation."})
+    direct_vm.mock_llm(".*", '{"tier": "P2", "confidence": 90, "reason": "Edge case calculation bug fixed."}')
+
+    contract.adjudicate_claim(claim_id)
+
+    # After adjudication, pending_claims_count drops to 0
+    pool_data = contract.get_pool(pool_id)
+    assert '"pending_claims_count": 0' in pool_data
+    assert '"total_deposited": "9500"' in pool_data
+
+    # Alice can now safely close and withdraw remaining 9500 GEN
+    direct_vm.sender = direct_alice
+    refunded = contract.close_and_withdraw_pool(pool_id)
+    assert int(refunded) == 9500
+
+    pool_data_after = contract.get_pool(pool_id)
+    assert '"total_deposited": "0"' in pool_data_after
+    assert '"is_active": false' in pool_data_after
+
+
+def test_cross_pool_replay_isolation(contract, direct_vm, direct_alice, direct_bob, direct_charlie):
+    """
+    Test cross-pool replay isolation:
+    An unauthenticated or separate pool cannot block claims in another pool for the same repository.
+    Replay protection is strictly scoped per pool.
+    """
+    # Alice creates legitimate Pool 1 for org/repo with 10,000 GEN
+    direct_vm.sender = direct_alice
+    direct_vm.value = 10000
+    pool_1 = contract.create_bounty_pool("https://github.com/org/repo", 5000, 2000, 500)
+
+    # Charlie creates another Pool 2 for the same org/repo with 5,000 GEN
+    direct_vm.sender = direct_charlie
+    direct_vm.value = 5000
+    pool_2 = contract.create_bounty_pool("https://github.com/org/repo", 3000, 1000, 300)
+
+    # Bob submits PR #42 to Pool 1
+    direct_vm.sender = direct_bob
+    claim_1 = contract.submit_claim(
+        pool_1,
+        "https://github.com/org/repo/pull/42",
+        "https://github.com/org/repo/issues/40"
+    )
+
+    # PR #42 is pending in Pool 1, but NOT in Pool 2
+    assert contract.is_pr_pending(pool_1, 42) is True
+    assert contract.is_pr_pending(pool_2, 42) is False
+
+    # Bob can ALSO submit PR #42 to Pool 2 independently (Pool 1 does not block Pool 2)
+    claim_2 = contract.submit_claim(
+        pool_2,
+        "https://github.com/org/repo/pull/42.diff",
+        "https://github.com/org/repo/issues/40"
+    )
+    assert contract.is_pr_pending(pool_2, 42) is True
+
+    # Within Pool 1, duplicate submission of PR #42 (via .patch alias) is STILL BLOCKED
+    with pytest.raises(Exception):
+        contract.submit_claim(
+            pool_1,
+            "https://github.com/org/repo/pull/42.patch",
+            "https://github.com/org/repo/issues/40"
+        )
+
+    # Adjudicate Pool 1 claim (APPROVED P1, 2000 GEN)
+    direct_vm.mock_web("pull/42.diff", {"status": 200, "body": "diff --git a/Auth.sol: fix auth bypass"})
+    direct_vm.mock_web("issues/40", {"status": 200, "body": "Issue #40: Auth bypass vulnerability."})
+    direct_vm.mock_llm(".*", '{"tier": "P1", "confidence": 95, "reason": "Auth bypass fixed."}')
+
+    contract.adjudicate_claim(claim_1)
+
+    # PR #42 is now permanently claimed in Pool 1
+    assert contract.is_pr_claimed(pool_1, 42) is True
+    assert contract.is_pr_pending(pool_1, 42) is False
+
+    # Re-submitting PR #42 to Pool 1 is PERMANENTLY BLOCKED
+    with pytest.raises(Exception):
+        contract.submit_claim(
+            pool_1,
+            "https://github.com/org/repo/pull/42",
+            "https://github.com/org/repo/issues/40"
+        )
+
+    # BUT Pool 2 claim for PR #42 remains active and isolated!
+    claim_2_data = contract.get_claim(claim_2)
+    assert '"status": "PENDING"' in claim_2_data
+    assert contract.is_pr_claimed(pool_2, 42) is False
+    assert contract.is_pr_pending(pool_2, 42) is True
+

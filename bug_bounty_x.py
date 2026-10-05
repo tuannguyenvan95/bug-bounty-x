@@ -165,6 +165,7 @@ class BountyPool:
     p0_critical_amount: bigint  # Fund drain / remote code execution
     p1_high_amount: bigint      # Logic break / state freeze
     p2_medium_amount: bigint    # Griefing / edge-case leak
+    pending_claims_count: bigint  # Active claims awaiting adjudication
     is_active: bool
 
 
@@ -264,6 +265,7 @@ class Contract(gl.Contract):
             p0_critical_amount=p0,
             p1_high_amount=p1,
             p2_medium_amount=p2,
+            pending_claims_count=bigint(0),
             is_active=True
         )
 
@@ -301,16 +303,19 @@ class Contract(gl.Contract):
         pr_number, canonical_diff_url = _parse_canonical_pr(pr_diff_url, pool.repo_owner, pool.repo_name)
         issue_number, canonical_issue_url = _parse_canonical_issue(issue_url, pool.repo_owner, pool.repo_name)
 
-        # 2. Canonical Identity Replay Protection (immune to aliases like .diff, .patch, /)
-        canonical_patch_key = f"{pool.repo_owner}/{pool.repo_name}:PR-{pr_number}"
+        # 2. Canonical Identity Replay Protection scoped to pool
+        # Cross-pool replay isolation: Replay state is strictly scoped to this pool
+        canonical_patch_key = f"{pool_id}:PR-{pr_number}"
 
         if canonical_patch_key in self.claimed_patches and self.claimed_patches[canonical_patch_key]:
-            raise gl.UserError(f"Pull request #{pr_number} has already received a bounty payout.")
+            raise gl.UserError(f"Pull request #{pr_number} has already received a bounty payout from pool {pool_id}.")
 
         if canonical_patch_key in self.pending_patches and self.pending_patches[canonical_patch_key]:
-            raise gl.UserError(f"A claim for pull request #{pr_number} is already pending adjudication.")
+            raise gl.UserError(f"A claim for pull request #{pr_number} is already pending adjudication in pool {pool_id}.")
 
         self.pending_patches[canonical_patch_key] = True
+        pool.pending_claims_count += bigint(1)
+        self.pools[pool_id] = pool
 
         self.claim_count += bigint(1)
         cid = str(self.claim_count)
@@ -515,14 +520,19 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
         claim.reason = reason
         claim.resolved_at = self.claim_count
 
-        canonical_patch_key = f"{pool.repo_owner}/{pool.repo_name}:PR-{pr_number_int}"
+        canonical_patch_key = f"{claim.pool_id}:PR-{pr_number_int}"
+
+        # Decrement active pending claims count
+        if pool.pending_claims_count > bigint(0):
+            pool.pending_claims_count -= bigint(1)
 
         if tier == "REJECTED":
             claim.status = "REJECTED"
             claim.reward_awarded = bigint(0)
             self.claims[claim_id] = claim
-            # Release pending lock so another fix or claim can be submitted
+            # Release pending lock so another fix or claim can be submitted to this pool
             self.pending_patches[canonical_patch_key] = False
+            self.pools[claim.pool_id] = pool
             return
 
         # Determine payout based on tier
@@ -546,7 +556,7 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             self.pools[claim.pool_id] = pool
             self.claims[claim_id] = claim
 
-            # Persistent Replay Protection: Lock canonical PR permanently against any future payouts
+            # Persistent Replay Protection: Lock canonical PR permanently within this pool
             self.claimed_patches[canonical_patch_key] = True
             self.pending_patches[canonical_patch_key] = False
 
@@ -557,6 +567,7 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             claim.reason = "Pool has insufficient funds for bounty payout."
             self.claims[claim_id] = claim
             self.pending_patches[canonical_patch_key] = False
+            self.pools[claim.pool_id] = pool
 
     @gl.public.write
     def toggle_pool_status(self, pool_id: str, is_active: bool) -> None:
@@ -569,6 +580,36 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             raise gl.UserError("Unauthorized: Only creator or owner can toggle status.")
         pool.is_active = is_active
         self.pools[pool_id] = pool
+
+    @gl.public.write
+    def close_and_withdraw_pool(self, pool_id: str) -> bigint:
+        """
+        Allow pool creator to close the pool and withdraw unused funds.
+        Enforces pending-claim protection: cannot withdraw while any claims are pending.
+        """
+        if pool_id not in self.pools:
+            raise gl.UserError("Pool not found.")
+
+        pool = self.pools[pool_id]
+        sender_hex = _addr_str(_get_sender())
+        if sender_hex != _addr_str(pool.creator):
+            raise gl.UserError("Unauthorized: Only pool creator can close and withdraw.")
+
+        if pool.pending_claims_count > bigint(0):
+            raise gl.UserError(
+                f"Cannot withdraw: pool has {int(pool.pending_claims_count)} claim(s) currently pending adjudication."
+            )
+
+        refund_amount = pool.total_deposited
+        if refund_amount <= bigint(0):
+            raise gl.UserError("No remaining funds in pool to withdraw.")
+
+        pool.total_deposited = bigint(0)
+        pool.is_active = False
+        self.pools[pool_id] = pool
+
+        _safe_transfer(pool.creator, refund_amount)
+        return refund_amount
 
     @gl.public.view
     def get_pool(self, pool_id: str) -> str:
@@ -586,6 +627,7 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             "p0_critical": str(p.p0_critical_amount),
             "p1_high": str(p.p1_high_amount),
             "p2_medium": str(p.p2_medium_amount),
+            "pending_claims_count": int(p.pending_claims_count),
             "is_active": p.is_active
         })
 
@@ -612,39 +654,39 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
         })
 
     @gl.public.view
-    def is_pr_claimed(self, repo_owner: str, repo_name: str, pr_number: int) -> bool:
-        """Check whether a canonical PR identity has already received a bounty payout."""
-        canonical_key = f"{repo_owner.lower()}/{repo_name.lower()}:PR-{pr_number}"
+    def is_pr_claimed(self, pool_id: str, pr_number: int) -> bool:
+        """Check whether a PR has already received a bounty payout from a specific pool."""
+        canonical_key = f"{pool_id}:PR-{pr_number}"
         return canonical_key in self.claimed_patches and self.claimed_patches[canonical_key]
 
     @gl.public.view
-    def is_pr_pending(self, repo_owner: str, repo_name: str, pr_number: int) -> bool:
-        """Check whether a canonical PR identity is currently pending adjudication."""
-        canonical_key = f"{repo_owner.lower()}/{repo_name.lower()}:PR-{pr_number}"
+    def is_pr_pending(self, pool_id: str, pr_number: int) -> bool:
+        """Check whether a PR is currently pending adjudication in a specific pool."""
+        canonical_key = f"{pool_id}:PR-{pr_number}"
         return canonical_key in self.pending_patches and self.pending_patches[canonical_key]
 
     @gl.public.view
     def is_patch_claimed(self, pool_id: str, pr_diff_url: str) -> bool:
-        """Check whether a specific PR URL has already received a bounty payout."""
+        """Check whether a specific PR URL has already received a bounty payout from a specific pool."""
         if pool_id not in self.pools:
             return False
         pool = self.pools[pool_id]
         try:
             pr_num, _ = _parse_canonical_pr(pr_diff_url, pool.repo_owner, pool.repo_name)
-            canonical_key = f"{pool.repo_owner}/{pool.repo_name}:PR-{pr_num}"
+            canonical_key = f"{pool_id}:PR-{pr_num}"
             return canonical_key in self.claimed_patches and self.claimed_patches[canonical_key]
         except Exception:
             return False
 
     @gl.public.view
     def is_patch_pending(self, pool_id: str, pr_diff_url: str) -> bool:
-        """Check whether a specific PR URL is currently pending adjudication."""
+        """Check whether a specific PR URL is currently pending adjudication in a specific pool."""
         if pool_id not in self.pools:
             return False
         pool = self.pools[pool_id]
         try:
             pr_num, _ = _parse_canonical_pr(pr_diff_url, pool.repo_owner, pool.repo_name)
-            canonical_key = f"{pool.repo_owner}/{pool.repo_name}:PR-{pr_num}"
+            canonical_key = f"{pool_id}:PR-{pr_num}"
             return canonical_key in self.pending_patches and self.pending_patches[canonical_key]
         except Exception:
             return False
