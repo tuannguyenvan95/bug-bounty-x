@@ -582,7 +582,7 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
         self.pools[pool_id] = pool
 
     @gl.public.write
-    def close_and_withdraw_pool(self, pool_id: str) -> bigint:
+    def close_and_withdraw_pool(self, pool_id: str) -> int:
         """
         Allow pool creator to close the pool and withdraw unused funds.
         Enforces pending-claim protection: cannot withdraw while any claims are pending.
@@ -609,7 +609,7 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
         self.pools[pool_id] = pool
 
         _safe_transfer(pool.creator, refund_amount)
-        return refund_amount
+        return int(refund_amount)
 
     @gl.public.view
     def get_pool(self, pool_id: str) -> str:
