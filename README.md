@@ -9,13 +9,11 @@
 
 ## 1. Deployment & Live Network Evidence
 
-The BugBountyX Intelligent Contract is officially deployed and verified on GenLayer studionet:
-
-- **Contract Address:** `0x13f5AB411F7F18f3f04DC2c0c07AF8da2bBB7B7A`
+- **Contract Address:** `0x07Ef8d317125C42222583A2a9933982Ad6f7caC8`
 - **Deployment Network:** `studionet` (Chain ID: `61999` / `0xF1EF`)
 - **Execution Environment:** GenVM / Optimistic Democracy Semantic Consensus
 - **Contract Source:** [`contracts/bug_bounty_x.py`](contracts/bug_bounty_x.py)
-- **Explorer:** [http://explorer-studio.genlayer.com/address/0x13f5AB411F7F18f3f04DC2c0c07AF8da2bBB7B7A](http://explorer-studio.genlayer.com/address/0x13f5AB411F7F18f3f04DC2c0c07AF8da2bBB7B7A)
+- **Explorer:** [http://explorer-studio.genlayer.com/address/0x07Ef8d317125C42222583A2a9933982Ad6f7caC8](http://explorer-studio.genlayer.com/address/0x07Ef8d317125C42222583A2a9933982Ad6f7caC8)
 
 ### Worked Example: Incident Submission & AI Adjudicated Payout
 
@@ -109,7 +107,7 @@ Traditional string matching (e.g. `repo_slug in url`) is vulnerable to host spoo
 1. **Host Verification:** Validates that the hostname is strictly `github.com` or `www.github.com`.
 2. **Repository Namespace Extraction:** Validates that the URL path matches `/ <repo_owner> / <repo_name> / pull / <pr_number>`.
 
-### B. Canonical PR Identity & Anti-Alias Replay Protection
+### B. Canonical PR Identity & Cross-Pool Replay Isolation
 GitHub allows pull requests to be viewed and fetched under multiple aliases:
 - Web: `https://github.com/owner/repo/pull/42`
 - Trailing slash: `https://github.com/owner/repo/pull/42/`
@@ -118,11 +116,18 @@ GitHub allows pull requests to be viewed and fetched under multiple aliases:
 - Query parameters: `https://github.com/owner/repo/pull/42?tab=files`
 
 BugBountyX strips all extensions and collapses any alias into its exact integer identity: `pr_number = 42`.
-The replay key is bound strictly to `f"{pool.repo_owner}/{pool.repo_name}:PR-{pr_number}"`.
-- **Race Condition Prevention:** Submitting PR #42 while a claim is pending is rejected.
-- **Double Payout Prevention:** Once PR #42 receives a payout, all aliases are permanently locked out from ever receiving another payout.
+The replay key is strictly scoped per pool: `f"{pool_id}:PR-{pr_number}"`.
+- **Cross-Pool Replay Isolation:** Replay state is scoped to each bounty pool. An unauthenticated or spam pool cannot grief or block claims on legitimate bounty pools for the same repository.
+- **Race Condition Prevention:** Submitting PR #42 while a claim is pending within that pool is rejected.
+- **Anti-Alias Double Payout Prevention:** Once PR #42 receives a payout in a pool, all aliases (`.diff`, `.patch`, `/`, `?query`) are permanently locked out from ever receiving another payout from that pool.
 
-### C. Contract-Acquired Evidence
+### C. Safe Creator Close-and-Withdraw & Pending-Claim Protection
+Pool creators can close inactive pools and recover unused escrow funds via `close_and_withdraw_pool(pool_id) -> int`:
+- **Creator Authentication:** Only `pool.creator` can invoke the close and refund action.
+- **Pending-Claim Lockout:** If `pool.pending_claims_count > 0`, the withdrawal transaction reverts immediately with `"Cannot withdraw: pool has N claim(s) currently pending adjudication"`. Creators cannot rug-pull or withdraw funds while vulnerability fixes are undergoing consensus.
+- **Complete Deactivation:** Once withdrawn, `pool.total_deposited` becomes 0 and `pool.is_active` is set to `False`.
+
+### D. Contract-Acquired Evidence
 Rather than trusting the whitehat's submitted URL for data fetching, the contract directly synthesizes the canonical fetch URLs:
 - `canonical_diff_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}.diff"`
 - `canonical_issue_url = f"https://github.com/{owner}/{repo}/issues/{issue_number}"`
